@@ -60,12 +60,14 @@ class FakeService {
   }
 }
 
+// powerbi-client is Microsoft's embedding SDK — stub it so tests run without a real iframe.
 mock.module('powerbi-client', () => ({
   service: { Service: FakeService },
   factories: { hpmFactory: {}, wpmpFactory: {}, routerFactory: {} },
   models: { TokenType: { Embed: 'Embed' }, Permissions: { All: 'All' } },
 }))
 
+// setupSentry/reportError wrap Sentry (third-party) — stub to keep tests offline.
 const reportError = mock(() => {})
 mock.module('@screenly/edge-apps/utils', () => ({
   setupSentry: () => {},
@@ -323,6 +325,22 @@ describe('services', () => {
       expect(document.querySelector('.error-message')?.textContent).toBe(
         'Embed token unavailable',
       )
+    })
+
+    it('when token backend is unreachable, should skip asset without showing error', async () => {
+      setScreenly({ ...OAUTH_SETTINGS, embed_url: REPORT_EMBED_URL })
+      globalThis.fetch = mock(async () => {
+        throw new TypeError('Failed to fetch')
+      }) as unknown as typeof fetch
+
+      const result = await initializePowerBI()
+
+      expect(result).toBeUndefined()
+      expect(reportError).toHaveBeenCalledWith(expect.any(TypeError), {
+        source: 'embed-token',
+      })
+      expect(document.querySelector('.error-container')).toBeNull()
+      expect(signalReady).not.toHaveBeenCalled()
     })
 
     async function embedAndGetErrorHandler() {
