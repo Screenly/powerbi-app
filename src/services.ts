@@ -120,7 +120,7 @@ function createReloadController(report: Embed) {
   return { reset, reloadOrShowError }
 }
 
-export async function initializePowerBI(): Promise<Embed> {
+export async function initializePowerBI(): Promise<Embed | undefined> {
   const embedUrl = screenly.settings.embed_url
   const resourceType = getEmbedTypeFromUrl(embedUrl)
 
@@ -130,6 +130,14 @@ export async function initializePowerBI(): Promise<Embed> {
   } catch (error) {
     reportError(error, { source: 'embed-token' })
     const failure = error as Error & { status?: number }
+
+    // A fetch that never got a response (no status) means our token backend was unreachable
+    // — a transient server-side blip, not a Power BI problem. Leave the asset unready (no
+    // error screen, no ready signal) so the player skips it and retries on the next rotation.
+    if (failure.status === undefined) {
+      return
+    }
+
     showError({
       detailedMessage: failure.message,
       technicalDetails: {
