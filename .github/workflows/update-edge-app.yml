@@ -3,36 +3,55 @@ name: Update Edge App
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - development
-      - main
+    inputs:
+      environment:
+        description: 'Environment to update edge app (stage or production)'
+        required: true
+        default: 'stage'
+        type: choice
+        options:
+          - stage
+          - production
 
-run-name: Updating Powerbi App in ${{ github.event_name == 'workflow_dispatch' && 'stage' || (github.ref == 'refs/heads/main' && 'production' || 'stage') }}
+      delete_missing_settings:
+        description: 'Delete missing settings'
+        default: false
+        type: boolean
+
+run-name: Updating Powerbi App in ${{ inputs.environment }}
 
 jobs:
-  deploy-stage:
-    name: Updating Powerbi App in stage
+  deploy:
+    name: Updating Powerbi App in ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/development') || github.event_name == 'workflow_dispatch'
-    environment: stage
-    steps:
-      - uses: actions/checkout@v7
-      - uses: Screenly/edge-apps-actions/update@v1
-        with:
-          screenly_api_token: ${{ secrets.SCREENLY_API_TOKEN }}
-          environment: stage
-          delete_missing_settings: 'true'
+    environment: ${{ inputs.environment }}
+    env:
+      API_BASE_URL: ${{ inputs.environment == 'stage' && 'https://api.screenlyappstage.com' || 'https://api.screenlyapp.com' }}
+      APP_PATH: dist
+      SCREENLY_API_TOKEN: ${{ secrets.SCREENLY_API_TOKEN }}
+      MANIFEST_FILE_NAME: ${{ inputs.environment == 'stage' && 'screenly_qc.yml' || 'screenly.yml' }}
 
-  deploy-production:
-    name: Updating Powerbi App in production
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: production
     steps:
-      - uses: actions/checkout@v7
-      - uses: Screenly/edge-apps-actions/update@v1
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v7
         with:
-          screenly_api_token: ${{ secrets.SCREENLY_API_TOKEN }}
-          environment: production
-          delete_missing_settings: 'true'
+          ref: ${{ inputs.environment == 'production' && 'main' || github.ref }}
+
+      - name: 🛠 Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.2
+
+      - name: 🛠 Install dependencies and build
+        run: |
+          bun install
+          bun run build
+
+      - name: 📋 Log manifest
+        run: cat ${{ env.APP_PATH }}/${{ env.MANIFEST_FILE_NAME }}
+
+      - name: 🚀 Deploy Edge App
+        uses: screenly/cli@master
+        with:
+          screenly_api_token: ${{ env.SCREENLY_API_TOKEN }}
+          cli_commands: edge-app deploy --path="${{ env.APP_PATH }}" --delete-missing-settings=${{ inputs.delete_missing_settings }}
