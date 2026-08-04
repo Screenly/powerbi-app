@@ -1,26 +1,41 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="m-0 p-0 h-full">
   <head>
     <meta charset="utf-8" />
     <title>Screenly Power BI Edge App</title>
     <script src="screenly.js?version=1"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   </head>
-  <body>
-    <div id="embed-container"></div>
+  <body class="m-0 p-0 h-full">
+    <div
+      id="embed-container"
+      class="w-full h-screen mx-auto [&_iframe]:border-0"
+    ></div>
 
     <template id="error-template">
-      <div class="error-container">
-        <h1>Unable to load report</h1>
-        <p class="error-message"></p>
-        <table class="error-details"></table>
+      <div
+        class="error-container flex flex-col items-center justify-center h-full p-[40px] box-border font-[Segoe_UI,Tahoma,Geneva,Verdana,sans-serif] text-[#333] bg-[#f5f5f5]"
+      >
+        <h1 class="m-0 mb-[20px] text-[24px] font-semibold text-[#c42b1c]">
+          Unable to load report
+        </h1>
+        <p
+          class="error-message w-[600px] bg-white border border-[#ddd] rounded-[4px] box-border m-0 mb-[20px] px-[16px] py-[12px] text-[14px]"
+        ></p>
+        <table
+          class="error-details w-[600px] bg-white border border-[#ddd] rounded-[4px] box-border border-collapse text-[13px]"
+        ></table>
       </div>
     </template>
 
     <template id="error-row-template">
-      <tr>
-        <td class="error-key"></td>
-        <td class="error-value"></td>
+      <tr class="group">
+        <td
+          class="error-key px-[12px] py-[8px] border-b border-[#eee] group-last:border-b-0 font-semibold whitespace-nowrap text-[#555]"
+        ></td>
+        <td
+          class="error-value px-[12px] py-[8px] border-b border-[#eee] group-last:border-b-0 font-[Consolas,Monaco,monospace] break-all"
+        ></td>
       </tr>
     </template>
 
