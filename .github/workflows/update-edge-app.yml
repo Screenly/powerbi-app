@@ -29,7 +29,8 @@ jobs:
       API_BASE_URL: ${{ inputs.environment == 'stage' && 'https://api.screenlyappstage.com' || 'https://api.screenlyapp.com' }}
       APP_PATH: dist
       SCREENLY_API_TOKEN: ${{ secrets.SCREENLY_API_TOKEN }}
-      MANIFEST_FILE_NAME: ${{ inputs.environment == 'stage' && 'screenly_qc.yml' || 'screenly.yml' }}
+      MANIFEST_FILE_NAME: screenly.yml
+      EDGE_APP_ID: ${{ secrets.EDGE_APP_ID || (inputs.environment == 'production' && vars.PRODUCTION_EDGE_APP_ID || (inputs.environment == 'stage' && vars.STAGE_EDGE_APP_ID)) }}
 
     steps:
       - name: ⬇️ Checkout Repository
