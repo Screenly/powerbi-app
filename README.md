@@ -4,6 +4,12 @@ A dashboard for displaying Power BI dashboards and reports with big focus on sec
 
 For details, please see the [tutorial](https://www.screenly.io/tutorials/powerbi/).
 
+## How it works
+
+![How the app works](docs/how-it-works.svg)
+
+The diagram is generated from [`docs/how-it-works.d2`](docs/how-it-works.d2). After editing it, regenerate the SVG with `d2 --layout=elk docs/how-it-works.d2 docs/how-it-works.svg`.
+
 ## Development
 
 ```bash

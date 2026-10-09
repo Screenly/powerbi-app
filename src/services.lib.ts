@@ -1,25 +1,54 @@
-import { factories, service } from 'powerbi-client'
-import type { PowerBiError } from './services.types'
+import type { PowerBiError, PowerBiErrorInfo } from './services.types'
 
 export const DASHBOARD_READY_DELAY_MS = 1000
 
-// Power BI's "FailedToLoadModel" is transient (a stale/evicted dataset session); reload
-// the report a few times to recover before giving up and showing the error screen. The
-// delay gives the dataset time to come back and clears reload()'s 100ms throttle, so an
-// immediate retry isn't silently dropped.
-const MODEL_LOAD_ERROR = 'FailedToLoadModel'
-export const MAX_MODEL_RELOADS = 3
-export const MODEL_RELOAD_DELAY_MS = 5000
+export const TOKEN_REFRESH_INTERVAL_MS = 5 * 60_000
+export const RESTART_DELAY_MS = 60_000
 
-export function isModelLoadError(error: PowerBiError): boolean {
-  return (error.message ?? '').includes(MODEL_LOAD_ERROR)
-}
+const REPORTABLE_FALLBACK_MESSAGE = 'Power BI embed error'
+const DEFAULT_ERROR_MESSAGE = 'Unable to load report'
 
 // Build a real Error (so Sentry groups/titles it instead of "Object captured as exception").
-export function toReportableError(error: PowerBiError): Error {
-  return new Error(
-    error.message ?? error.detailedMessage ?? 'Power BI embed error',
-  )
+export function toReportableError(
+  error: PowerBiError | Error | undefined,
+): Error {
+  if (error instanceof Error) {
+    return error
+  }
+
+  if (!error) {
+    return new Error(REPORTABLE_FALLBACK_MESSAGE)
+  }
+
+  if (error.message) {
+    return new Error(error.message)
+  }
+
+  if (error.detailedMessage) {
+    return new Error(error.detailedMessage)
+  }
+
+  return new Error(REPORTABLE_FALLBACK_MESSAGE)
+}
+
+function getErrorInfo(error: PowerBiError): PowerBiErrorInfo[] {
+  if (!error.technicalDetails || !error.technicalDetails.errorInfo) {
+    return []
+  }
+
+  return error.technicalDetails.errorInfo
+}
+
+function getDisplayMessage(error: PowerBiError): string {
+  if (error.detailedMessage) {
+    return error.detailedMessage
+  }
+
+  if (error.message) {
+    return error.message
+  }
+
+  return DEFAULT_ERROR_MESSAGE
 }
 
 // Flatten errorInfo to a string so Sentry's normalizeDepth doesn't truncate the nested
@@ -30,22 +59,9 @@ export function powerBiErrorContext(
   return {
     source: 'powerbi-embed',
     detailedMessage: error.detailedMessage,
-    errorInfo: JSON.stringify(error.technicalDetails?.errorInfo ?? null),
+    errorInfo: JSON.stringify(getErrorInfo(error)),
   }
 }
-
-let embedService: service.Service | undefined
-
-export function getEmbedService(): service.Service {
-  embedService ??= new service.Service(
-    factories.hpmFactory,
-    factories.wpmpFactory,
-    factories.routerFactory,
-  )
-  return embedService
-}
-
-const DEFAULT_ERROR_MESSAGE = 'Unable to load report'
 
 export function showError(error: PowerBiError): void {
   const container = document.getElementById('embed-container') as HTMLElement
@@ -57,25 +73,20 @@ export function showError(error: PowerBiError): void {
   const content = template.content.cloneNode(true) as DocumentFragment
 
   const messageEl = content.querySelector('.error-message') as HTMLElement
-  messageEl.textContent =
-    error.detailedMessage ?? error.message ?? DEFAULT_ERROR_MESSAGE
+  messageEl.textContent = getDisplayMessage(error)
 
   const table = content.querySelector('.error-details') as HTMLElement
   const rowTemplate = document.getElementById(
     'error-row-template',
   ) as HTMLTemplateElement
-  const errorInfo = error.technicalDetails && error.technicalDetails.errorInfo
-
-  if (errorInfo) {
-    errorInfo.forEach(function (item) {
-      const row = rowTemplate.content.cloneNode(true) as DocumentFragment
-      ;(row.querySelector('.error-key') as HTMLElement).textContent = item.key
-      ;(row.querySelector('.error-value') as HTMLElement).textContent = String(
-        item.value,
-      )
-      table.appendChild(row)
-    })
-  }
+  getErrorInfo(error).forEach(function (item) {
+    const row = rowTemplate.content.cloneNode(true) as DocumentFragment
+    ;(row.querySelector('.error-key') as HTMLElement).textContent = item.key
+    ;(row.querySelector('.error-value') as HTMLElement).textContent = String(
+      item.value,
+    )
+    table.appendChild(row)
+  })
 
   container.appendChild(content)
   screenly.signalReadyForRendering()

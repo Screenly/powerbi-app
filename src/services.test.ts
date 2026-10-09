@@ -1,23 +1,24 @@
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  mock,
-  spyOn,
-} from 'bun:test'
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import type { Embed } from 'powerbi-client'
 
 GlobalRegistrator.register()
 
-const NOW_MS = 1_700_000_000_000
 const OAUTH_SETTINGS = {
   screenly_oauth_tokens_url: 'https://api.example.com/oauth/',
   screenly_app_auth_token: 'app-auth',
 }
 const REPORT_EMBED_URL =
   'https://app.powerbi.com/reportEmbed?reportId=r&groupId=g'
+const DASHBOARD_EMBED_URL =
+  'https://app.powerbi.com/dashboardEmbed?dashboardId=d&groupId=g'
+const EMBED_ERROR_EVENT = {
+  detail: {
+    message: 'ExplorationContainer_FailedToLoadModel_DefaultDetails',
+    detailedMessage: 'This Fabric capacity is currently not available',
+  },
+}
+const REFRESH_TIMER_ID = 42
 
 function setupDom() {
   document.body.innerHTML = `
@@ -46,24 +47,21 @@ function setupDom() {
 const embedCalls: Array<{ config: Record<string, unknown> }> = []
 const reportOn = mock(() => {})
 const reportSetAccessToken = mock(async () => {})
-const reportReload = mock(async () => {})
 const fakeReport = {
   on: reportOn,
   setAccessToken: reportSetAccessToken,
-  reload: reportReload,
+} as unknown as Embed
+function embedFakeReport(_container: unknown, config: Record<string, unknown>) {
+  embedCalls.push({ config })
+  return fakeReport
 }
+const powerbiEmbed = mock(embedFakeReport)
+const powerbiReset = mock(() => {})
 
-class FakeService {
-  embed(_container: unknown, config: Record<string, unknown>) {
-    embedCalls.push({ config })
-    return fakeReport
-  }
-}
-
-// powerbi-client is Microsoft's embedding SDK — stub it so tests run without a real iframe.
+Object.assign(window, {
+  powerbi: { embed: powerbiEmbed, reset: powerbiReset },
+})
 mock.module('powerbi-client', () => ({
-  service: { Service: FakeService },
-  factories: { hpmFactory: {}, wpmpFactory: {}, routerFactory: {} },
   models: { TokenType: { Embed: 'Embed' }, Permissions: { All: 'All' } },
 }))
 
@@ -74,27 +72,25 @@ mock.module('@screenly/edge-apps/utils', () => ({
   reportError,
 }))
 
-const { getEmbedToken, initTokenRefreshLoop, initializePowerBI } =
+const { getEmbedToken, startTokenRefresh, startPowerBI, initializePowerBI } =
   await import('./services')
 const { showError } = await import('./services.lib')
 
 const signalReady = mock(() => {})
+const signalAbort = mock(() => {})
 
 function setScreenly(settings: Record<string, unknown>) {
   ;(globalThis as Record<string, unknown>).screenly = {
     settings,
     signalReadyForRendering: signalReady,
+    signalAbort,
   }
 }
 
-function isoFromNow(offsetSec: number): string {
-  return new Date(NOW_MS + offsetSec * 1000).toISOString()
-}
-
-function okFetch(token: string, expiration: string): typeof fetch {
+function okFetch(token: string): typeof fetch {
   return mock(async () => ({
     ok: true,
-    json: async () => ({ token, expiration }),
+    json: async () => ({ token }),
   })) as unknown as typeof fetch
 }
 
@@ -106,6 +102,30 @@ function failFetch(message: string, status: number): typeof fetch {
   })) as unknown as typeof fetch
 }
 
+function unreachableFetch(): typeof fetch {
+  return mock(async () => {
+    throw new TypeError('Failed to fetch')
+  }) as unknown as typeof fetch
+}
+
+const originalSetTimeout = globalThis.setTimeout
+const originalSetInterval = globalThis.setInterval
+const originalClearInterval = globalThis.clearInterval
+let timeouts: Array<{ fn: () => unknown; delayMs: number }>
+let intervals: Array<{ fn: () => unknown; delayMs: number }>
+const clearIntervalSpy = mock(() => {})
+
+function flushPromises() {
+  return new Promise((resolve) => originalSetTimeout(resolve, 0))
+}
+
+function firstReportedError() {
+  return reportError.mock.calls[0] as unknown as [
+    Error,
+    Record<string, unknown>,
+  ]
+}
+
 // eslint-disable-next-line max-lines-per-function
 describe('services', () => {
   let originalFetch: typeof fetch
@@ -113,10 +133,36 @@ describe('services', () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch
     reportError.mockClear()
+    reportOn.mockClear()
+    reportSetAccessToken.mockReset()
+    reportSetAccessToken.mockImplementation(async () => {})
+    powerbiEmbed.mockReset()
+    powerbiEmbed.mockImplementation(embedFakeReport)
+    powerbiReset.mockClear()
+    signalReady.mockClear()
+    signalAbort.mockClear()
+    clearIntervalSpy.mockClear()
+    embedCalls.length = 0
+    timeouts = []
+    intervals = []
+    globalThis.setTimeout = ((fn: () => unknown, delayMs: number) => {
+      timeouts.push({ fn, delayMs })
+      return timeouts.length
+    }) as unknown as typeof setTimeout
+    globalThis.setInterval = ((fn: () => unknown, delayMs: number) => {
+      intervals.push({ fn, delayMs })
+      return REFRESH_TIMER_ID
+    }) as unknown as typeof setInterval
+    globalThis.clearInterval =
+      clearIntervalSpy as unknown as typeof clearInterval
+    setupDom()
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
     delete (globalThis as Record<string, unknown>).screenly
   })
 
@@ -129,20 +175,17 @@ describe('services', () => {
 
       const result = await getEmbedToken()
 
-      expect(result).toEqual({ token: 'static-token', expiration: null })
+      expect(result).toBe('static-token')
       expect(globalThis.fetch).not.toHaveBeenCalled()
     })
 
-    it('when embed_token setting absent, should fetch token and expiration from endpoint', async () => {
+    it('when embed_token setting absent, should fetch token from endpoint', async () => {
       setScreenly({ ...OAUTH_SETTINGS })
-      globalThis.fetch = okFetch('embed-token', '2030-01-01T00:00:00Z')
+      globalThis.fetch = okFetch('embed-token')
 
       const result = await getEmbedToken()
 
-      expect(result).toEqual({
-        token: 'embed-token',
-        expiration: '2030-01-01T00:00:00Z',
-      })
+      expect(result).toBe('embed-token')
       expect(globalThis.fetch).toHaveBeenCalledWith(
         'https://api.example.com/oauth/embed_token/',
         {
@@ -182,119 +225,120 @@ describe('services', () => {
     })
   })
 
-  describe('initTokenRefreshLoop', () => {
-    let scheduled: Array<{ fn: () => unknown; delayMs: number }>
-    let originalSetTimeout: typeof setTimeout
-    let nowSpy: ReturnType<typeof spyOn>
-
+  describe('startTokenRefresh', () => {
     beforeEach(() => {
-      scheduled = []
-      originalSetTimeout = globalThis.setTimeout
-      globalThis.setTimeout = ((fn: () => unknown, delayMs: number) => {
-        scheduled.push({ fn, delayMs })
-        return 0
-      }) as unknown as typeof setTimeout
-      nowSpy = spyOn(Date, 'now').mockReturnValue(NOW_MS)
-      setScreenly({ ...OAUTH_SETTINGS, refresh_interval: '5' })
+      setScreenly({ ...OAUTH_SETTINGS })
     })
 
-    afterEach(() => {
-      globalThis.setTimeout = originalSetTimeout
-      nowSpy.mockRestore()
+    it('when started, should refresh every five minutes', () => {
+      startTokenRefresh(fakeReport)
+
+      expect(intervals[0].delayMs).toBe(300_000)
     })
 
-    function makeReport() {
-      return {
-        on: mock(() => {}),
-        setAccessToken: mock(async () => {}),
-      } as unknown as Parameters<typeof initTokenRefreshLoop>[0]
-    }
+    it('when interval fires, should set fresh token', async () => {
+      globalThis.fetch = okFetch('new-token')
+      startTokenRefresh(fakeReport)
 
-    it('when started, should schedule first refresh from initial expiration', () => {
-      initTokenRefreshLoop(makeReport(), isoFromNow(100))
+      await intervals[0].fn()
 
-      expect(scheduled[0].delayMs).toBe(60_000)
+      expect(reportSetAccessToken).toHaveBeenCalledWith('new-token')
     })
 
-    it('when refresh succeeds, should set new token and reschedule from new expiration', async () => {
-      globalThis.fetch = okFetch('new-token', isoFromNow(200))
-      const report = makeReport()
-      initTokenRefreshLoop(report, isoFromNow(100))
-
-      await scheduled[0].fn()
-
-      expect(report.setAccessToken).toHaveBeenCalledWith('new-token')
-      expect(scheduled[1].delayMs).toBe(120_000)
-    })
-
-    it('when refresh fails, should back off and increment error step', async () => {
+    it('when token fetch fails, should report it to sentry', async () => {
       globalThis.fetch = failFetch('boom', 500)
-      initTokenRefreshLoop(makeReport(), isoFromNow(100))
+      startTokenRefresh(fakeReport)
 
-      await scheduled[0].fn()
-      expect(scheduled[1].delayMs).toBe(15_000)
+      await intervals[0].fn()
 
-      await scheduled[1].fn()
-      expect(scheduled[2].delayMs).toBe(30_000)
+      const [reportedError, context] = firstReportedError()
+      expect(reportSetAccessToken).not.toHaveBeenCalled()
+      expect(reportedError.message).toBe('boom')
+      expect(context).toEqual({ source: 'token-refresh' })
     })
 
-    it('when refresh fails repeatedly, should report only first failure to sentry', async () => {
+    it('when refresh fails repeatedly, should report only first failure', async () => {
       globalThis.fetch = failFetch('boom', 500)
-      initTokenRefreshLoop(makeReport(), isoFromNow(100))
+      startTokenRefresh(fakeReport)
 
-      await scheduled[0].fn()
-      await scheduled[1].fn()
+      await intervals[0].fn()
+      await intervals[0].fn()
 
       expect(reportError).toHaveBeenCalledTimes(1)
-      expect(reportError).toHaveBeenCalledWith(expect.anything(), {
-        source: 'token-refresh',
+    })
+
+    it('when refresh fails again after success, should report new failure', async () => {
+      startTokenRefresh(fakeReport)
+
+      globalThis.fetch = failFetch('boom', 500)
+      await intervals[0].fn()
+      globalThis.fetch = okFetch('new-token')
+      await intervals[0].fn()
+      globalThis.fetch = failFetch('boom again', 500)
+      await intervals[0].fn()
+
+      expect(reportError).toHaveBeenCalledTimes(2)
+    })
+
+    it('when setAccessToken rejects with power bi error, should report it as error', async () => {
+      globalThis.fetch = okFetch('new-token')
+      reportSetAccessToken.mockImplementation(async () => {
+        throw { message: 'TokenExpired', detailedMessage: 'Token expired' }
       })
+      startTokenRefresh(fakeReport)
+
+      await intervals[0].fn()
+
+      const [reportedError, context] = firstReportedError()
+      expect(reportedError).toBeInstanceOf(Error)
+      expect(reportedError.message).toBe('TokenExpired')
+      expect(context).toEqual({ source: 'token-refresh' })
+    })
+
+    it('when setAccessToken rejects without reason, should report fallback error', async () => {
+      globalThis.fetch = okFetch('new-token')
+      reportSetAccessToken.mockImplementation(async () => {
+        throw undefined
+      })
+      startTokenRefresh(fakeReport)
+
+      await intervals[0].fn()
+
+      const [reportedError] = firstReportedError()
+      expect(reportedError.message).toBe('Power BI embed error')
+    })
+  })
+
+  describe('startPowerBI', () => {
+    it('when embed throws, should report it and abort without restart', async () => {
+      setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
+      powerbiEmbed.mockImplementationOnce(() => {
+        throw new Error('Invalid embed URL')
+      })
+
+      startPowerBI()
+      await flushPromises()
+
+      const [reportedError, context] = firstReportedError()
+      expect(reportedError.message).toBe('Invalid embed URL')
+      expect(context).toEqual({ source: 'powerbi-embed' })
+      expect(signalAbort).toHaveBeenCalled()
+      expect(timeouts).toEqual([])
     })
   })
 
   // eslint-disable-next-line max-lines-per-function
   describe('initializePowerBI', () => {
-    let scheduled: Map<number, () => void>
-    let nextTimerId: number
-    let originalSetTimeout: typeof setTimeout
-    let originalClearTimeout: typeof clearTimeout
-
-    beforeEach(() => {
-      embedCalls.length = 0
-      reportOn.mockClear()
-      reportSetAccessToken.mockClear()
-      reportReload.mockClear()
-      signalReady.mockClear()
-      scheduled = new Map()
-      nextTimerId = 1
-      originalSetTimeout = globalThis.setTimeout
-      originalClearTimeout = globalThis.clearTimeout
-      globalThis.setTimeout = ((fn: () => void) => {
-        const id = nextTimerId++
-        scheduled.set(id, fn)
-        return id
-      }) as unknown as typeof setTimeout
-      globalThis.clearTimeout = ((id: number) => {
-        scheduled.delete(id)
-      }) as unknown as typeof clearTimeout
-      setupDom()
-    })
-
-    afterEach(() => {
-      globalThis.setTimeout = originalSetTimeout
-      globalThis.clearTimeout = originalClearTimeout
-    })
-
-    function runScheduledReloads() {
-      const pending = [...scheduled.values()]
-      scheduled.clear()
-      pending.forEach((fn) => fn())
+    function findReportHandler(event: string) {
+      return reportOn.mock.calls.find((call) => call[0] === event)?.[1] as (
+        event?: unknown,
+      ) => void
     }
 
-    it('when embedding report, should embed with view permissions and return report', async () => {
+    it('when embedding report, should embed with token and all permissions', async () => {
       setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
 
-      const report = await initializePowerBI()
+      await initializePowerBI()
 
       expect(embedCalls[0].config).toMatchObject({
         accessToken: 'static-token',
@@ -302,139 +346,115 @@ describe('services', () => {
         tokenType: 'Embed',
         permissions: 'All',
       })
-      expect(report).toBe(fakeReport)
+    })
 
-      const renderedHandler = reportOn.mock.calls.find(
-        (call) => call[0] === 'rendered',
-      )?.[1] as () => void
-      renderedHandler()
+    it('when report renders, should signal ready', async () => {
+      setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
+      await initializePowerBI()
+
+      findReportHandler('rendered')()
+
       expect(signalReady).toHaveBeenCalled()
     })
 
-    it('when token retrieval fails, should report, render error, and rethrow', async () => {
+    it('when dashboard loads, should signal ready after one second', async () => {
+      setScreenly({
+        embed_token: 'static-token',
+        embed_url: DASHBOARD_EMBED_URL,
+      })
+      await initializePowerBI()
+
+      findReportHandler('loaded')()
+
+      expect(timeouts).toEqual([{ fn: signalReady, delayMs: 1000 }])
+    })
+
+    it('when embedded with static token, should still start token refresh', async () => {
+      setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
+
+      await initializePowerBI()
+
+      expect(intervals).toHaveLength(1)
+    })
+
+    it('when token backend rejects request, should show error and restart after one minute', async () => {
       setScreenly({ ...OAUTH_SETTINGS, embed_url: REPORT_EMBED_URL })
       globalThis.fetch = failFetch('Embed token unavailable', 403)
 
-      await expect(initializePowerBI()).rejects.toThrow(
-        'Embed token unavailable',
-      )
+      await initializePowerBI()
 
-      expect(reportError).toHaveBeenCalledWith(expect.anything(), {
-        source: 'embed-token',
-      })
+      const [reportedError, context] = firstReportedError()
+      expect(reportedError.message).toBe('Embed token unavailable')
+      expect(context).toEqual({ source: 'embed-token' })
       expect(document.querySelector('.error-message')?.textContent).toBe(
         'Embed token unavailable',
       )
+      expect(signalReady).toHaveBeenCalled()
+      expect(signalAbort).not.toHaveBeenCalled()
+      expect(timeouts).toEqual([{ fn: startPowerBI, delayMs: 60_000 }])
     })
 
-    it('when token backend is unreachable, should skip asset without showing error', async () => {
-      setScreenly({ ...OAUTH_SETTINGS, embed_url: REPORT_EMBED_URL })
-      globalThis.fetch = mock(async () => {
-        throw new TypeError('Failed to fetch')
-      }) as unknown as typeof fetch
+    it.each([
+      ['is unreachable', unreachableFetch()],
+      ['returns 5xx', failFetch('Service unavailable', 503)],
+    ])(
+      'when token backend %s, should abort without error screen or restart',
+      async (_description, fetchStub) => {
+        setScreenly({ ...OAUTH_SETTINGS, embed_url: REPORT_EMBED_URL })
+        globalThis.fetch = fetchStub
 
-      const result = await initializePowerBI()
+        await initializePowerBI()
 
-      expect(result).toBeUndefined()
-      expect(reportError).toHaveBeenCalledWith(expect.any(TypeError), {
-        source: 'embed-token',
-      })
-      expect(document.querySelector('.error-container')).toBeNull()
-      expect(signalReady).not.toHaveBeenCalled()
-    })
+        expect(signalAbort).toHaveBeenCalled()
+        expect(signalReady).not.toHaveBeenCalled()
+        expect(document.querySelector('.error-container')).toBeNull()
+        expect(timeouts).toEqual([])
+      },
+    )
 
-    async function embedAndGetErrorHandler() {
+    it('when embed fires error, should report it and show it', async () => {
       setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
       await initializePowerBI()
-      return reportOn.mock.calls.find(
-        (call) => call[0] === 'error',
-      )?.[1] as (event: { detail: unknown }) => void
-    }
 
-    it('when embed fires non-model error, should report it and render error', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
+      findReportHandler('error')(EMBED_ERROR_EVENT)
 
-      errorHandler({ detail: { detailedMessage: 'TokenExpired' } })
-
-      const [reportedError, context] = reportError.mock.calls[0] as [
-        Error,
-        Record<string, unknown>,
-      ]
-      expect(reportedError.message).toBe('TokenExpired')
-      expect(context.source).toBe('powerbi-embed')
-      expect(reportReload).not.toHaveBeenCalled()
+      const [reportedError, context] = firstReportedError()
+      expect(reportedError.message).toBe(
+        'ExplorationContainer_FailedToLoadModel_DefaultDetails',
+      )
+      expect(context).toEqual({
+        source: 'powerbi-embed',
+        detailedMessage: 'This Fabric capacity is currently not available',
+        errorInfo: '[]',
+      })
       expect(document.querySelector('.error-message')?.textContent).toBe(
-        'TokenExpired',
+        'This Fabric capacity is currently not available',
       )
     })
 
-    it('when embed fires model-load error, should reload instead of showing error', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
+    it('when embed fires error, should remove report and stop token refresh', async () => {
+      setScreenly({ ...OAUTH_SETTINGS, embed_url: REPORT_EMBED_URL })
+      globalThis.fetch = okFetch('backend-token')
+      await initializePowerBI()
 
-      errorHandler({ detail: { message: 'X_FailedToLoadModel_Y' } })
-      runScheduledReloads()
+      findReportHandler('error')(EMBED_ERROR_EVENT)
 
-      expect(reportReload).toHaveBeenCalledTimes(1)
-      expect(document.querySelector('.error-message')).toBeNull()
+      expect(powerbiReset).toHaveBeenCalledWith(
+        document.getElementById('embed-container'),
+      )
+      expect(clearIntervalSpy).toHaveBeenCalledWith(REFRESH_TIMER_ID)
     })
 
-    it('when reload request fails and attempts remain, should retry instead of showing error', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
-      reportReload.mockImplementationOnce(async () => {
-        throw new Error('reload failed')
-      })
+    it('when embed fires error, should embed again after one minute', async () => {
+      setScreenly({ embed_token: 'static-token', embed_url: REPORT_EMBED_URL })
+      await initializePowerBI()
+      findReportHandler('error')(EMBED_ERROR_EVENT)
 
-      errorHandler({ detail: { message: 'X_FailedToLoadModel_Y' } })
-      runScheduledReloads()
-      await new Promise((resolve) => originalSetTimeout(resolve, 0))
+      expect(timeouts).toEqual([{ fn: startPowerBI, delayMs: 60_000 }])
+      timeouts[0].fn()
+      await flushPromises()
 
-      expect(reportError).toHaveBeenCalledWith(expect.any(Error), {
-        source: 'powerbi-reload',
-      })
-      expect(document.querySelector('.error-container')).toBeNull()
-
-      runScheduledReloads()
-      expect(reportReload).toHaveBeenCalledTimes(2)
-    })
-
-    it('when duplicate errors fire before reload, should schedule only one reload', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
-      const modelError = { detail: { message: 'X_FailedToLoadModel_Y' } }
-
-      errorHandler(modelError)
-      errorHandler(modelError)
-      runScheduledReloads()
-
-      expect(reportReload).toHaveBeenCalledTimes(1)
-    })
-
-    it('when report renders before reload fires, should cancel pending reload', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
-      const renderedHandler = reportOn.mock.calls.find(
-        (call) => call[0] === 'rendered',
-      )?.[1] as () => void
-
-      errorHandler({ detail: { message: 'X_FailedToLoadModel_Y' } })
-      renderedHandler()
-      runScheduledReloads()
-
-      expect(reportReload).not.toHaveBeenCalled()
-    })
-
-    it('when model-load errors exceed max reloads, should show error', async () => {
-      const errorHandler = await embedAndGetErrorHandler()
-      const modelError = { detail: { message: 'X_FailedToLoadModel_Y' } }
-
-      errorHandler(modelError)
-      runScheduledReloads()
-      errorHandler(modelError)
-      runScheduledReloads()
-      errorHandler(modelError)
-      runScheduledReloads()
-      errorHandler(modelError)
-
-      expect(reportReload).toHaveBeenCalledTimes(3)
-      expect(document.querySelector('.error-container')).not.toBeNull()
+      expect(embedCalls).toHaveLength(2)
     })
   })
 })

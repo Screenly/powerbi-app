@@ -1,26 +1,19 @@
 import { models, type Embed } from 'powerbi-client'
-import {
-  getEmbedTypeFromUrl,
-  getErrorBackoffSec,
-  getRefreshDelaySec,
-  getTokenRefreshInterval,
-} from './utils'
+import { reportError } from '@screenly/edge-apps/utils'
+import { getEmbedTypeFromUrl } from './utils'
 import {
   DASHBOARD_READY_DELAY_MS,
-  MAX_MODEL_RELOADS,
-  MODEL_RELOAD_DELAY_MS,
-  getEmbedService,
-  isModelLoadError,
+  RESTART_DELAY_MS,
+  TOKEN_REFRESH_INTERVAL_MS,
   powerBiErrorContext,
   showError,
   toReportableError,
 } from './services.lib'
-import type { EmbedToken, PowerBiError } from './services.types'
-import { reportError } from '@screenly/edge-apps/utils'
+import type { PowerBiError } from './services.types'
 
-export async function getEmbedToken(): Promise<EmbedToken> {
+export async function getEmbedToken(): Promise<string> {
   if (screenly.settings.embed_token) {
-    return { token: screenly.settings.embed_token, expiration: null }
+    return screenly.settings.embed_token
   }
 
   const response = await fetch(
@@ -47,94 +40,60 @@ export async function getEmbedToken(): Promise<EmbedToken> {
     throw error
   }
 
-  const { token, expiration } = await response.json()
-  return { token, expiration: expiration ?? null }
+  const { token } = await response.json()
+  return token
 }
 
-export function initTokenRefreshLoop(
+export function startTokenRefresh(
   report: Embed,
-  initialExpiration: string | null,
-): void {
-  let currentErrorStep = 0
-  const maxRefreshIntervalSec = getTokenRefreshInterval()
+): ReturnType<typeof setInterval> {
+  let hasReportedFailure = false
 
-  async function run() {
-    let nextTimeout: number
+  return setInterval(async () => {
     try {
-      const { token, expiration } = await getEmbedToken()
+      const token = await getEmbedToken()
       await report.setAccessToken(token)
-      currentErrorStep = 0
-      nextTimeout = getRefreshDelaySec(expiration, maxRefreshIntervalSec)
+      hasReportedFailure = false
     } catch (error) {
-      if (currentErrorStep === 0) {
-        reportError(error, { source: 'token-refresh' })
+      if (hasReportedFailure) {
+        return
       }
-      nextTimeout = getErrorBackoffSec(currentErrorStep, maxRefreshIntervalSec)
-      currentErrorStep += 1
-    }
-    setTimeout(run, nextTimeout * 1000)
-  }
 
-  setTimeout(
-    run,
-    getRefreshDelaySec(initialExpiration, maxRefreshIntervalSec) * 1000,
-  )
+      hasReportedFailure = true
+      reportError(
+        toReportableError(error as PowerBiError | Error | undefined),
+        {
+          source: 'token-refresh',
+        },
+      )
+    }
+  }, TOKEN_REFRESH_INTERVAL_MS)
 }
 
-// Drives model-load recovery. Both a fresh error event and a failed reload funnel through
-// reloadOrShowError so they share one retry budget. While a reload is pending, further
-// errors are ignored so duplicates don't stack overlapping reloads. A successful render
-// calls reset(), cancelling any reload still waiting on its delay.
-function createReloadController(report: Embed) {
-  let attempts = 0
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  function reset() {
-    if (timer !== undefined) {
-      clearTimeout(timer)
-      timer = undefined
-    }
-    attempts = 0
-  }
-
-  function reloadOrShowError(detail: PowerBiError) {
-    if (timer !== undefined) {
-      return
-    }
-
-    if (attempts >= MAX_MODEL_RELOADS) {
-      showError(detail)
-      return
-    }
-
-    attempts += 1
-    timer = setTimeout(() => {
-      timer = undefined
-      report.reload().catch((reloadError) => {
-        reportError(reloadError, { source: 'powerbi-reload' })
-        reloadOrShowError(detail)
-      })
-    }, MODEL_RELOAD_DELAY_MS)
-  }
-
-  return { reset, reloadOrShowError }
+function scheduleRestart() {
+  setTimeout(startPowerBI, RESTART_DELAY_MS)
 }
 
-export async function initializePowerBI(): Promise<Embed | undefined> {
+export function startPowerBI(): void {
+  initializePowerBI().catch((error) => {
+    reportError(toReportableError(error), { source: 'powerbi-embed' })
+    screenly.signalAbort()
+  })
+}
+
+export async function initializePowerBI(): Promise<void> {
   const embedUrl = screenly.settings.embed_url
   const resourceType = getEmbedTypeFromUrl(embedUrl)
 
-  let initialToken: EmbedToken
+  let token: string
   try {
-    initialToken = await getEmbedToken()
+    token = await getEmbedToken()
   } catch (error) {
     reportError(error, { source: 'embed-token' })
-    const failure = error as Error & { status?: number }
 
-    // A fetch that never got a response (no status) means our token backend was unreachable
-    // — a transient server-side blip, not a Power BI problem. Leave the asset unready (no
-    // error screen, no ready signal) so the player skips it and retries on the next rotation.
-    if (failure.status === undefined) {
+    const failure = error as Error & { status?: number }
+    if (failure.status === undefined || failure.status >= 500) {
+      screenly.signalAbort()
       return
     }
 
@@ -144,13 +103,14 @@ export async function initializePowerBI(): Promise<Embed | undefined> {
         errorInfo: [{ key: 'status', value: failure.status }],
       },
     })
-    throw error
+    scheduleRestart()
+    return
   }
 
   const container = document.getElementById('embed-container') as HTMLElement
-  const report = getEmbedService().embed(container, {
+  const report = window.powerbi.embed(container, {
     embedUrl: embedUrl,
-    accessToken: initialToken.token,
+    accessToken: token,
     type: resourceType,
     tokenType: models.TokenType.Embed,
     permissions: models.Permissions.All,
@@ -161,18 +121,11 @@ export async function initializePowerBI(): Promise<Embed | undefined> {
     },
   })
 
-  // powerbi-client also dispatches a DOM 'error' CustomEvent that bubbles to window, where
-  // Sentry's global handler double-captures it; we report it explicitly below instead.
-  container.addEventListener('error', (event) => event.stopPropagation())
-
-  const reloadController = createReloadController(report)
+  const refreshTimer = startTokenRefresh(report)
 
   if (resourceType === 'report') {
-    report.on('rendered', () => {
-      reloadController.reset()
-      screenly.signalReadyForRendering()
-    })
-  } else if (resourceType === 'dashboard') {
+    report.on('rendered', () => screenly.signalReadyForRendering())
+  } else {
     report.on('loaded', () => {
       setTimeout(screenly.signalReadyForRendering, DASHBOARD_READY_DELAY_MS)
     })
@@ -181,18 +134,9 @@ export async function initializePowerBI(): Promise<Embed | undefined> {
   report.on('error', (event) => {
     const detail = event.detail as PowerBiError
     reportError(toReportableError(detail), powerBiErrorContext(detail))
-
-    if (isModelLoadError(detail)) {
-      reloadController.reloadOrShowError(detail)
-      return
-    }
-
+    clearInterval(refreshTimer)
+    window.powerbi.reset(container)
     showError(detail)
+    scheduleRestart()
   })
-
-  if (!screenly.settings.embed_token) {
-    initTokenRefreshLoop(report, initialToken.expiration)
-  }
-
-  return report
 }
