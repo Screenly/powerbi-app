@@ -64,6 +64,11 @@ export function powerBiErrorContext(
 }
 
 export function showError(error: PowerBiError): void {
+  if (screenly.settings.display_errors === 'false') {
+    screenly.signalAbort()
+    return
+  }
+
   const container = document.getElementById('embed-container') as HTMLElement
   container.innerHTML = ''
 

@@ -21,6 +21,7 @@ skip: "signalAbort()" {class: bad}
 embed: Embed report or dashboard
 refresh: "Get embed token\n(failures reported)"
 ready: "signalReadyForRendering()" {class: good}
+show_errors: "display_errors\nsetting on?" {class: decision}
 error_shown: "Show error screen\n(e.g. Power BI not connected,\ncapacity paused)\n+ signalReadyForRendering()" {class: bad}
 wait: "Wait 1 min"
 
@@ -30,13 +31,15 @@ has_static -> embed: "yes\n(static test token)"
 backend -> token_ok
 token_ok -> embed: yes
 token_ok -> skip: "backend down\n(no answer or 5xx)"
-token_ok -> error_shown: other error
+token_ok -> show_errors: other error
 embed -> powerbi
 embed -> skip: "embed throws\n(broken config)"
 embed -> refresh: start
 refresh -> refresh: every 5 min
 refresh -> powerbi: "setAccessToken(token)"
 powerbi -> ready: "rendered\n(dashboard: loaded + 1 s)"
-powerbi -> error_shown: "any error:\nremove report, stop refresh"
+powerbi -> show_errors: "any error:\nremove report, stop refresh"
+show_errors -> error_shown: yes
+show_errors -> skip: "no\n(set to false)"
 error_shown -> wait
 get_token <- wait: {style.stroke-dash: 4}

@@ -464,6 +464,7 @@ describe('services.lib', () => {
     beforeEach(() => {
       setScreenly({})
       signalReady.mockClear()
+      signalAbort.mockClear()
       setupDom()
     })
 
@@ -483,6 +484,16 @@ describe('services.lib', () => {
       expect(document.querySelector('.error-key')?.textContent).toBe('status')
       expect(document.querySelector('.error-value')?.textContent).toBe('403')
       expect(signalReady).toHaveBeenCalled()
+    })
+
+    it('when display_errors is false, should abort instead of showing error', () => {
+      setScreenly({ display_errors: 'false' })
+
+      showError({ detailedMessage: 'Unable to load report' })
+
+      expect(signalAbort).toHaveBeenCalledTimes(1)
+      expect(signalReady).not.toHaveBeenCalled()
+      expect(document.querySelector('.error-container')).toBeNull()
     })
 
     it('when only message present, should render message', () => {

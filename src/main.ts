@@ -6,9 +6,9 @@ import { startPowerBI } from './services'
 setupSentry('powerbi', { powerbi: { embed_url: screenly.settings.embed_url } })
 
 panic.configure({
-  handleErrors: screenly.settings.display_errors === 'true',
+  handleErrors: screenly.settings.display_backtraces === 'true',
 })
-if (screenly.settings.display_errors === 'true') {
+if (screenly.settings.display_backtraces === 'true') {
   window.addEventListener('error', screenly.signalReadyForRendering)
   window.addEventListener(
     'unhandledrejection',
