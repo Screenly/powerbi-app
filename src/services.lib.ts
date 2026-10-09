@@ -64,7 +64,7 @@ export function powerBiErrorContext(
 }
 
 export function showError(error: PowerBiError): void {
-  if (screenly.settings.display_errors === 'false') {
+  if (screenly.settings.display_error_messages === 'false') {
     screenly.signalAbort()
     return
   }

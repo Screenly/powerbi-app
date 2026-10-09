@@ -20,10 +20,10 @@ settings:
         help_text: For debugging purposes to display JavaScript errors with their backtraces on the screen.
         type: boolean
       schema_version: 1
-  display_errors:
+  display_error_messages:
     type: string
     default_value: 'true'
-    title: Display Errors
+    title: Display Error Messages
     optional: true
     help_text:
       properties:

@@ -486,8 +486,8 @@ describe('services.lib', () => {
       expect(signalReady).toHaveBeenCalled()
     })
 
-    it('when display_errors is false, should abort instead of showing error', () => {
-      setScreenly({ display_errors: 'false' })
+    it('when display_error_messages is false, should abort instead of showing error', () => {
+      setScreenly({ display_error_messages: 'false' })
 
       showError({ detailedMessage: 'Unable to load report' })
 
