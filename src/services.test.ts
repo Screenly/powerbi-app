@@ -111,9 +111,11 @@ function unreachableFetch(): typeof fetch {
 const originalSetTimeout = globalThis.setTimeout
 const originalSetInterval = globalThis.setInterval
 const originalClearInterval = globalThis.clearInterval
+const originalClearTimeout = globalThis.clearTimeout
 let timeouts: Array<{ fn: () => unknown; delayMs: number }>
 let intervals: Array<{ fn: () => unknown; delayMs: number }>
 const clearIntervalSpy = mock(() => {})
+const clearTimeoutSpy = mock(() => {})
 
 function flushPromises() {
   return new Promise((resolve) => originalSetTimeout(resolve, 0))
@@ -142,6 +144,7 @@ describe('services', () => {
     signalReady.mockClear()
     signalAbort.mockClear()
     clearIntervalSpy.mockClear()
+    clearTimeoutSpy.mockClear()
     embedCalls.length = 0
     timeouts = []
     intervals = []
@@ -155,6 +158,7 @@ describe('services', () => {
     }) as unknown as typeof setInterval
     globalThis.clearInterval =
       clearIntervalSpy as unknown as typeof clearInterval
+    globalThis.clearTimeout = clearTimeoutSpy as unknown as typeof clearTimeout
     setupDom()
   })
 
@@ -163,6 +167,7 @@ describe('services', () => {
     globalThis.setTimeout = originalSetTimeout
     globalThis.setInterval = originalSetInterval
     globalThis.clearInterval = originalClearInterval
+    globalThis.clearTimeout = originalClearTimeout
     delete (globalThis as Record<string, unknown>).screenly
   })
 
@@ -367,6 +372,19 @@ describe('services', () => {
       findReportHandler('loaded')()
 
       expect(timeouts).toEqual([{ fn: signalReady, delayMs: 1000 }])
+    })
+
+    it('when dashboard errors before ready delay, should cancel ready signal', async () => {
+      setScreenly({
+        embed_token: 'static-token',
+        embed_url: DASHBOARD_EMBED_URL,
+      })
+      await initializePowerBI()
+      findReportHandler('loaded')()
+
+      findReportHandler('error')(EMBED_ERROR_EVENT)
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(1)
     })
 
     it('when embedded with static token, should still start token refresh', async () => {

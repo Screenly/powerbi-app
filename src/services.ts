@@ -123,17 +123,22 @@ export async function initializePowerBI(): Promise<void> {
 
   const refreshTimer = startTokenRefresh(report)
 
+  let dashboardReadyTimer: ReturnType<typeof setTimeout> | undefined
   if (resourceType === 'report') {
     report.on('rendered', () => screenly.signalReadyForRendering())
   } else {
     report.on('loaded', () => {
-      setTimeout(screenly.signalReadyForRendering, DASHBOARD_READY_DELAY_MS)
+      dashboardReadyTimer = setTimeout(
+        screenly.signalReadyForRendering,
+        DASHBOARD_READY_DELAY_MS,
+      )
     })
   }
 
   report.on('error', (event) => {
     const detail = event.detail as PowerBiError
     reportError(toReportableError(detail), powerBiErrorContext(detail))
+    clearTimeout(dashboardReadyTimer)
     clearInterval(refreshTimer)
     window.powerbi.reset(container)
     showError(detail)
