@@ -9,15 +9,25 @@ categories:
   - Dashboards
 ready_signal: true
 settings:
-  display_errors:
+  display_backtraces:
     type: string
     default_value: 'false'
-    title: Display Errors
+    title: Display Backtraces
     optional: true
     help_text:
       properties:
         advanced: true
-        help_text: For debugging purposes to display errors on the screen.
+        help_text: For debugging purposes to display JavaScript errors with their backtraces on the screen.
+        type: boolean
+      schema_version: 1
+  display_error_messages:
+    type: string
+    default_value: 'true'
+    title: Display Error Messages
+    optional: true
+    help_text:
+      properties:
+        help_text: Show an error message on the screen when the report can't be loaded or stops working. When off, the asset is skipped instead.
         type: boolean
       schema_version: 1
   embed_token:
@@ -37,17 +47,6 @@ settings:
       properties:
         help_text: The URL of the Power BI dashboard or report to display.
         type: oauth:power_bi:embed_url
-      schema_version: 1
-  refresh_interval:
-    type: string
-    title: Refresh Interval (minutes)
-    optional: true
-    default_value: '5'
-    help_text:
-      properties:
-        advanced: true
-        help_text: How often to refresh the Power BI report/dashboard (in minutes). Default is 5 minutes. Minimum is 1 minute.
-        type: number
       schema_version: 1
   sentry_dsn:
     type: secret
