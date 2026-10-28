@@ -2,7 +2,7 @@
 syntax: manifest_v1
 description: |
   Displays Power BI dashboards and reports with big focus on security.
-icon: https://playground.srly.io/edge-apps/powerbi/static/img/icon.svg
+icon: https://playground.srly.io/edge-apps/icons/powerbi.svg
 author: Screenly, Inc.
 categories:
   - Dashboards
