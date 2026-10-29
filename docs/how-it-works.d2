@@ -1,0 +1,45 @@
+title: |md
+  # Power BI edge app: how it works
+| {near: top-center}
+
+direction: down
+
+classes: {
+  external: {style: {fill: "#EEF1F4"; stroke: "#5B6474"; stroke-dash: 3}}
+  decision: {shape: diamond; style.fill: "#FFF6E0"}
+  good: {style: {fill: "#E3F4EC"; stroke: "#0E6E68"}}
+  bad: {style: {fill: "#FBE9E7"; stroke: "#B3261E"}}
+}
+
+backend: "Screenly backend\nGET /embed_token/" {class: external}
+powerbi: Power BI iframe {class: external}
+
+get_token: Get embed token
+has_static: "embed_token\nsetting set?" {class: decision}
+token_ok: Got a token? {class: decision}
+skip: "signalAbort()" {class: bad}
+embed: Embed report or dashboard
+refresh: "Get embed token\n(failures reported)"
+ready: "signalReadyForRendering()" {class: good}
+show_errors: "display_error_messages\nsetting on?" {class: decision}
+error_shown: "Show error screen\n(e.g. Power BI not connected,\ncapacity paused)\n+ signalReadyForRendering()" {class: bad}
+wait: "Wait 1 min"
+
+get_token -> has_static
+has_static -> backend: "no: request"
+has_static -> embed: "yes\n(static test token)"
+backend -> token_ok
+token_ok -> embed: yes
+token_ok -> skip: "backend down\n(no answer or 5xx)"
+token_ok -> show_errors: other error
+embed -> powerbi
+embed -> skip: "embed throws\n(broken config)"
+embed -> refresh: start
+refresh -> refresh: every 5 min
+refresh -> powerbi: "setAccessToken(token)"
+powerbi -> ready: "rendered\n(dashboard: loaded + 1 s)"
+powerbi -> show_errors: "any error:\nremove report, stop refresh"
+show_errors -> error_shown: yes
+show_errors -> skip: "no\n(set to false)"
+error_shown -> wait
+get_token <- wait: {style.stroke-dash: 4}
