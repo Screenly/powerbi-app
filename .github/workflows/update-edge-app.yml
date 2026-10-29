@@ -18,5 +18,9 @@ run-name: Updating Powerbi App in ${{ (github.event_name == 'push' && !github.ev
 jobs:
   update:
     uses: Screenly/edge-apps-actions/.github/workflows/update.yml@v26.10.2
+    # This app's old workflow never deleted settings missing from the manifest;
+    # keep it that way rather than take the reusable workflow's default (true).
+    with:
+      delete_missing_settings: false
     secrets:
       SCREENLY_API_TOKEN: ${{ secrets.SCREENLY_API_TOKEN }}
