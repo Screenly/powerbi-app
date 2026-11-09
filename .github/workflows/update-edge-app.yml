@@ -3,55 +3,24 @@ name: Update Edge App
 
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to update edge app (stage or production)'
-        required: true
-        default: 'stage'
-        type: choice
-        options:
-          - stage
-          - production
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v[0-9]*'
 
-      delete_missing_settings:
-        description: 'Delete missing settings'
-        default: false
-        type: boolean
+permissions:
+  contents: read
 
-run-name: Updating Powerbi App in ${{ inputs.environment }}
+run-name: Updating Powerbi App in ${{ (github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/v')) && 'production' || 'stage' }}
 
 jobs:
-  deploy:
-    name: Updating Powerbi App in ${{ inputs.environment }}
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    env:
-      API_BASE_URL: ${{ inputs.environment == 'stage' && 'https://api.screenlyappstage.com' || 'https://api.screenlyapp.com' }}
-      APP_PATH: dist
+  update:
+    uses: Screenly/edge-apps-actions/.github/workflows/update.yml@v26.10.2
+    # This app's old workflow never deleted settings missing from the manifest;
+    # keep it that way rather than take the reusable workflow's default (true).
+    with:
+      delete_missing_settings: false
+    secrets:
       SCREENLY_API_TOKEN: ${{ secrets.SCREENLY_API_TOKEN }}
-      MANIFEST_FILE_NAME: ${{ inputs.environment == 'stage' && 'screenly_qc.yml' || 'screenly.yml' }}
-
-    steps:
-      - name: ⬇️ Checkout Repository
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.environment == 'production' && 'main' || github.ref }}
-
-      - name: 🛠 Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.2.2
-
-      - name: 🛠 Install dependencies and build
-        run: |
-          bun install
-          bun run build
-
-      - name: 📋 Log manifest
-        run: cat ${{ env.APP_PATH }}/${{ env.MANIFEST_FILE_NAME }}
-
-      - name: 🚀 Deploy Edge App
-        uses: screenly/cli@master
-        with:
-          screenly_api_token: ${{ env.SCREENLY_API_TOKEN }}
-          cli_commands: edge-app deploy --path="${{ env.APP_PATH }}" --delete-missing-settings=${{ inputs.delete_missing_settings }}
